@@ -1,9 +1,9 @@
 name: Build Windows
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "development/tests" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "development/tests" ]
   schedule:
     - cron: '0 */4 * * *'
   workflow_dispatch:

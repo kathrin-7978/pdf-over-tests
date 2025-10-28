@@ -8,8 +8,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
-import java.util.concurrent.BrokenBarrierException;
-import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -40,9 +41,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 public abstract class AbstractSignatureUITest {
 
-    private static Thread uiThread;
-    private static Shell shell;
-    private static StateMachine sm;
+    private Thread uiThread;
+    private Display display;
+    private Shell shell;
+    private StateMachine sm;
     private SWTBot bot;
 
     private static final File inputFile = new File("src/test/resources/TestFile.pdf");
@@ -98,34 +100,75 @@ public abstract class AbstractSignatureUITest {
 
 
     @BeforeEach
-    public final void setupUITest() throws InterruptedException, BrokenBarrierException {
-        final CyclicBarrier swtBarrier = new CyclicBarrier(2);
+    public final void setupUITest() throws InterruptedException {
+        final CountDownLatch uiInitialized = new CountDownLatch(1);
+        final AtomicReference<Exception> initException = new AtomicReference<>();
 
-        if (uiThread == null) {
-            uiThread = new Thread(new Runnable() {
-                @Override
-                public void run() {
-
-                    Display.getDefault().syncExec(() -> {
-                        currentProfile = getCurrentProfile();
-                        setConfig(currentProfile);
-                        sm = Main.setup(new String[]{inputFile.getAbsolutePath()});
-                        shell = sm.getMainShell();
-
-                        try {
-                            swtBarrier.await();
-                        } catch (InterruptedException | BrokenBarrierException e) {
-                            throw new RuntimeException(e);
-                        }
-                        sm.start();
-                    });
+        uiThread = new Thread(() -> {
+            try {
+                display = new Display();
+                currentProfile = getCurrentProfile();
+                setConfig(currentProfile);
+                sm = Main.setup(new String[]{inputFile.getAbsolutePath()});
+                shell = sm.getMainShell();
+                
+                if (shell == null || shell.isDisposed()) {
+                    throw new IllegalStateException("Shell was not created properly");
                 }
-            });
-            uiThread.setDaemon(true);
-            uiThread.start();
+
+                // Signal that initialization is complete
+                uiInitialized.countDown();
+
+                // Start the state machine asynchronously to avoid blocking the event loop
+                display.asyncExec(() -> {
+                    try {
+                        sm.start();
+                    } catch (Exception e) {
+                        logger.error("Error starting state machine", e);
+                    }
+                });
+
+                // Run the event loop
+                while (!shell.isDisposed()) {
+                    try {
+                        if (!display.readAndDispatch()) {
+                            display.sleep();
+                        }
+                    } catch (Exception e) {
+                        logger.error("Error in event loop", e);
+                        break;
+                    }
+                }
+
+            } catch (Exception e) {
+                logger.error("Error initializing UI", e);
+                initException.set(e);
+                uiInitialized.countDown();
+            } finally {
+                // Cleanup
+                if (display != null && !display.isDisposed()) {
+                    display.dispose();
+                }
+            }
+            
+        }, "SWT-UI-Thread");
+
+        uiThread.setDaemon(false); // Don't make it daemon so JVM waits for cleanup
+        uiThread.start();
+
+        if (!uiInitialized.await(30, TimeUnit.SECONDS)) {
+            throw new RuntimeException("UI initialization timed out");
         }
-        swtBarrier.await();
-        bot =  new SWTBot(shell);
+
+        if (initException.get() != null) {
+            throw new RuntimeException("UI initialization failed", initException.get());
+        }
+        
+        if (shell == null || shell.isDisposed()) {
+            throw new IllegalStateException("Shell is not available after initialization");
+        }
+
+        bot = new SWTBot(shell);
     }
 
     @AfterEach
@@ -135,13 +178,23 @@ public abstract class AbstractSignatureUITest {
     }
 
     public void closeShell() throws InterruptedException {
-        Display.getDefault().syncExec(new Runnable() {
-            public void run() {
-                shell.close();
+        if (display != null && !display.isDisposed()) {
+            display.asyncExec(() -> {
+                if (shell != null && !shell.isDisposed()) {
+                    shell.close();
+                }
+            });
+            
+            uiThread.join(5000);
+            
+            if (uiThread.isAlive()) {
+                logger.warn("UI thread did not terminate gracefully, forcing disposal");
+                if (!display.isDisposed()) {
+                    display.wake();
+                }
+                uiThread.join(2000);
             }
-        });
-        uiThread.join();
-        uiThread = null;
+        }
     }
 
 
