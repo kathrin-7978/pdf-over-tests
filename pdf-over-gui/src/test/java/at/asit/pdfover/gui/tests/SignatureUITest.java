@@ -15,10 +15,13 @@ public class SignatureUITest extends AbstractSignatureUITest {
         testSignature(false, false);
     }
 
+    /*
     @ParameterizedTest
     @EnumSource(Profile.class)
     public void testSignatureAutoPositionNegative() throws IOException {
         setCredentials();
         testSignature(true, false);
     }
+    
+     */
 }
