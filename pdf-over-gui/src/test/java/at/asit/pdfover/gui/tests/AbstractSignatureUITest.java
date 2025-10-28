@@ -23,6 +23,8 @@ import org.eclipse.swtbot.swt.finder.waits.ICondition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,6 +41,7 @@ import org.apache.commons.io.FilenameUtils;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@Execution(ExecutionMode.SAME_THREAD)
 public abstract class AbstractSignatureUITest {
 
     private Thread uiThread;
@@ -111,7 +114,7 @@ public abstract class AbstractSignatureUITest {
                 setConfig(currentProfile);
                 sm = Main.setup(new String[]{inputFile.getAbsolutePath()});
                 shell = sm.getMainShell();
-                
+
                 if (shell == null || shell.isDisposed()) {
                     throw new IllegalStateException("Shell was not created properly");
                 }
@@ -119,26 +122,8 @@ public abstract class AbstractSignatureUITest {
                 // Signal that initialization is complete
                 uiInitialized.countDown();
 
-                // Start the state machine asynchronously to avoid blocking the event loop
-                display.asyncExec(() -> {
-                    try {
-                        sm.start();
-                    } catch (Exception e) {
-                        logger.error("Error starting state machine", e);
-                    }
-                });
-
-                // Run the event loop
-                while (!shell.isDisposed()) {
-                    try {
-                        if (!display.readAndDispatch()) {
-                            display.sleep();
-                        }
-                    } catch (Exception e) {
-                        logger.error("Error in event loop", e);
-                        break;
-                    }
-                }
+                // Hand over control to the StateMachine (it owns the SWT event loop)
+                sm.start();
 
             } catch (Exception e) {
                 logger.error("Error initializing UI", e);
@@ -147,13 +132,17 @@ public abstract class AbstractSignatureUITest {
             } finally {
                 // Cleanup
                 if (display != null && !display.isDisposed()) {
-                    display.dispose();
+                    try {
+                        display.dispose();
+                    } catch (Exception ignore) {
+                        // ignore
+                    }
                 }
             }
-            
+
         }, "SWT-UI-Thread");
 
-        uiThread.setDaemon(false); // Don't make it daemon so JVM waits for cleanup
+        uiThread.setDaemon(false);
         uiThread.start();
 
         if (!uiInitialized.await(30, TimeUnit.SECONDS)) {
@@ -163,7 +152,7 @@ public abstract class AbstractSignatureUITest {
         if (initException.get() != null) {
             throw new RuntimeException("UI initialization failed", initException.get());
         }
-        
+
         if (shell == null || shell.isDisposed()) {
             throw new IllegalStateException("Shell is not available after initialization");
         }
@@ -175,10 +164,9 @@ public abstract class AbstractSignatureUITest {
     public void reset() throws InterruptedException {
         logger.info("Starting test cleanup");
 
-        // IMPORTANT: Wait longer for background signing operations to complete
-        // The FinishSignThread needs time to complete
+        // Give background signing threads time to complete
         logger.info("Waiting for background operations to complete...");
-        Thread.sleep(3000);  // Increased from 1000ms to 3000ms
+        Thread.sleep(3000);
 
         deleteOutputFile();
         closeShell();
@@ -187,16 +175,14 @@ public abstract class AbstractSignatureUITest {
     }
 
     public void closeShell() throws InterruptedException {
-        if (display != null && !display.isDisposed()) {
-            /*
-            display.asyncExec(() -> {
-                if (shell != null && !shell.isDisposed()) {
-                    shell.close();
-                }
-            });
-            
-             */
+        // If Display already disposed or never created, nothing to do
+        if (display == null || display.isDisposed()) {
+            uiThread = null;
+            return;
+        }
 
+        try {
+            // Ask state machine to exit gracefully (on UI thread)
             if (sm != null) {
                 try {
                     display.syncExec(() -> {
@@ -210,28 +196,37 @@ public abstract class AbstractSignatureUITest {
                     logger.warn("Error during state machine stop", e);
                 }
             }
-            
-            Thread.sleep(1000);
 
-            display.asyncExec(() -> {
-                try {
-                    if (shell != null && !shell.isDisposed()) {
-                        logger.info("Closing shell");
-                        shell.close();
+            // Close shell (on UI thread)
+            try {
+                display.syncExec(() -> {
+                    try {
+                        if (shell != null && !shell.isDisposed()) {
+                            logger.info("Closing shell");
+                            shell.close();
+                        }
+                    } catch (Exception e) {
+                        logger.error("Error closing shell", e);
                     }
-                } catch (Exception e) {
-                    logger.error("Error closing shell", e);
+                });
+            } catch (org.eclipse.swt.SWTException swt) {
+                if (!"Device is disposed".equalsIgnoreCase(swt.getMessage())) {
+                    throw swt;
                 }
-            });
-            
-            display.wake();
-            
+                logger.warn("Display disposed before closeShell syncExec");
+            }
+
+            // Wait for UI thread to finish with timeout
             uiThread.join(10000);
-            
+
             if (uiThread.isAlive()) {
-                logger.warn("UI thread did not terminate gracefully, forcing disposal");
-                if (!display.isDisposed()) {
-                    display.wake();
+                logger.warn("UI thread did not terminate gracefully, nudging event loop and waiting again");
+                if (display != null && !display.isDisposed()) {
+                    try {
+                        display.wake();
+                    } catch (Exception ignore) {
+                        // ignore
+                    }
                 }
                 uiThread.join(3000);
 
@@ -241,6 +236,15 @@ public abstract class AbstractSignatureUITest {
             } else {
                 logger.info("UI thread terminated gracefully");
             }
+        } finally {
+            bot = null;
+            shell = null;
+            sm = null;
+            display = null;
+            uiThread = null;
+
+            // Small gap between tests to avoid race with background tasks
+            Thread.sleep(500);
         }
     }
 
@@ -249,12 +253,32 @@ public abstract class AbstractSignatureUITest {
         try {
             ICondition widgetExists = new WidgetExistsCondition(str("mobileBKU.number"));
             bot.waitUntil(widgetExists, 80000);
+
             bot.textWithLabel(str("mobileBKU.number")).setText("TestUser-1902503362");
             bot.textWithLabel(str("mobileBKU.password")).setText("123456789");
+
+            // Wait for OK to become enabled to avoid clicking a disabled button
+            bot.waitUntil(new ICondition() {
+                @Override
+                public boolean test() {
+                    try {
+                        return bot.button(str("common.Ok")).isEnabled();
+                    } catch (WidgetNotFoundException e) {
+                        return false;
+                    }
+                }
+                @Override public void init(SWTBot bot) {}
+                @Override public String getFailureMessage() { return "OK button did not become enabled"; }
+            }, 5000);
+
             bot.button(str("common.Ok")).click();
         }
         catch (WidgetNotFoundException wnf) {
-            bot.button(str("common.Cancel")).click();
+            try {
+                bot.button(str("common.Cancel")).click();
+            } catch (Exception ignore) {
+                // ignore
+            }
             fail(wnf.getMessage());
         }
 
@@ -263,17 +287,27 @@ public abstract class AbstractSignatureUITest {
         bot.waitUntil(outputExists, 20000);
 
         if(!output.exists()) {
-            bot.button(str("common.Cancel")).click();
+            try {
+                bot.button(str("common.Cancel")).click();
+            } catch (Exception ignore) {
+                // ignore
+            }
         }
         assertTrue(output.exists(), "Received signed PDF");
     }
 
     private void deleteOutputFile() {
-        if (getPathOutputFile() != null) {
-            File outputFile = new File(getPathOutputFile());
-            outputFile.delete();
-            assertFalse(outputFile.exists());
-            logger.info("Deleted output file");
+        String path = getPathOutputFile();
+        if (path != null) {
+            File outputFile = new File(path);
+            if (outputFile.exists()) {
+                boolean deleted = outputFile.delete();
+                if (deleted) {
+                    logger.info("Deleted output file");
+                } else {
+                    logger.warn("Failed to delete output file");
+                }
+            }
         }
     }
 
