@@ -163,6 +163,12 @@
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-surefire-plugin</artifactId>
 				<version>3.5.4</version>
+				<configuration>
+					<!-- Disable parallel execution -->
+					<parallel>none</parallel>
+					<threadCount>1</threadCount>
+					<perCoreThreadCount>false</perCoreThreadCount>
+				</configuration>
 			</plugin>
 			<plugin>
 				<artifactId>maven-clean-plugin</artifactId>

@@ -173,26 +173,73 @@ public abstract class AbstractSignatureUITest {
 
     @AfterEach
     public void reset() throws InterruptedException {
+        logger.info("Starting test cleanup");
+
+        // IMPORTANT: Wait longer for background signing operations to complete
+        // The FinishSignThread needs time to complete
+        logger.info("Waiting for background operations to complete...");
+        Thread.sleep(3000);  // Increased from 1000ms to 3000ms
+
         deleteOutputFile();
         closeShell();
+
+        logger.info("Test cleanup completed");
     }
 
     public void closeShell() throws InterruptedException {
         if (display != null && !display.isDisposed()) {
+            /*
             display.asyncExec(() -> {
                 if (shell != null && !shell.isDisposed()) {
                     shell.close();
                 }
             });
             
-            uiThread.join(5000);
+             */
+
+            if (sm != null) {
+                try {
+                    display.syncExec(() -> {
+                        try {
+                            sm.exit();
+                        } catch (Exception e) {
+                            logger.warn("Could not stop state machine", e);
+                        }
+                    });
+                } catch (Exception e) {
+                    logger.warn("Error during state machine stop", e);
+                }
+            }
+            
+            Thread.sleep(1000);
+
+            display.asyncExec(() -> {
+                try {
+                    if (shell != null && !shell.isDisposed()) {
+                        logger.info("Closing shell");
+                        shell.close();
+                    }
+                } catch (Exception e) {
+                    logger.error("Error closing shell", e);
+                }
+            });
+            
+            display.wake();
+            
+            uiThread.join(10000);
             
             if (uiThread.isAlive()) {
                 logger.warn("UI thread did not terminate gracefully, forcing disposal");
                 if (!display.isDisposed()) {
                     display.wake();
                 }
-                uiThread.join(2000);
+                uiThread.join(3000);
+
+                if (uiThread.isAlive()) {
+                    logger.error("UI thread still alive after 13 seconds, abandoning");
+                }
+            } else {
+                logger.info("UI thread terminated gracefully");
             }
         }
     }
