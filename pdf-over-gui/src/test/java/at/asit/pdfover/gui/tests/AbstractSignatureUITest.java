@@ -350,6 +350,7 @@ public abstract class AbstractSignatureUITest {
         try {
             FileOutputStream outputStream = new FileOutputStream(pdfOverConfig, false);
             props.store(outputStream, "TEST Configuration file was generated!");
+            logger.info("Configuration set");
         } catch (IOException e) {
             logger.warn("Failed to create configuration file.");
         }
