@@ -2,9 +2,9 @@
 name: Build Windows
 on:
   push:
-    branches: [ "feature/automated-ui-test" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "feature/automated-ui-test" ]
+    branches: [ "main" ]
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
